@@ -6,6 +6,7 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Configuration;
 using Telegram.Bot;
 using Telegram.Bot.Args;
+using Telegram.Bot.Types;
 using Telegram.Bot.Types.Enums;
 using Telegram.Bot.Types.ReplyMarkups;
 
@@ -13,29 +14,26 @@ namespace RelationshipAnarchyBot
 {
     internal class Logic
     {
-        private readonly List<Feature> _features;
         public readonly TelegramBotClient Bot;
 
-        private List<Feature> _partnerFeatures;
+        private readonly List<Feature> _featuresTemplate;
+        private readonly byte _featuresVersion;
+        private PersonInfo _me;
+        private PersonInfo _partner;
 
         private const string Cancel = "/cancel";
         private const string Done = "/done";
-        private const string FeaturesQuestion = "What would you like to have?";
 
         public Logic(IConfigurationRoot configuration)
         {
-            _features = new List<Feature>();
-            IConfigurationSection configFeatures = configuration.GetSection("features");
-            foreach (IConfigurationSection features in configFeatures.GetChildren())
-            {
-                var feature = new Feature(features["name"], features["description"]);
-                _features.Add(feature);
-            }
-
             string token = configuration["token"];
             Bot = new TelegramBotClient(token);
             Bot.OnMessage += OnMessageReceived;
             Bot.OnCallbackQuery += OnCallbackQueryReceived;
+
+            _featuresTemplate = LoadFeatures(configuration);
+
+            _featuresVersion = byte.Parse(configuration["featuresVersion"]);
         }
 
         private async void OnMessageReceived(object sender, MessageEventArgs e)
@@ -46,25 +44,27 @@ namespace RelationshipAnarchyBot
             }
 
             long chatId = e.Message.Chat.Id;
+            User user = e.Message.From;
             switch (e.Message.Text)
             {
                 case "/help":
                     await ShowHelp(chatId);
                     break;
                 case "/mark":
-                    await MarkFeatures(chatId);
+                    await MarkFeatures(chatId, user, "What would you like with your partner?");
                     break;
                 default:
-                    _partnerFeatures = null;
+                    _partner = null;
                     if (e.Message.ForwardFrom != null)
                     {
                         string code = e.Message.Text;
-                        _partnerFeatures = Decode(code, _features);
+                        _partner = PersonInfo.Decode(code, _featuresVersion, _featuresTemplate);
                     }
 
-                    if (_partnerFeatures != null)
+                    if (_partner != null)
                     {
-                        await Bot.SendTextMessageAsync(chatId, "Partner's wishes decoded! Now /mark yours.", ParseMode.Html);
+                        string question = $"@{_partner.Username}'s wishes decoded!{Environment.NewLine}What would you like?";
+                        await MarkFeatures(chatId, user, question);
                     }
                     else
                     {
@@ -77,7 +77,7 @@ namespace RelationshipAnarchyBot
         private async Task ShowHelp(long chatId)
         {
             var sb = new StringBuilder();
-            foreach (Feature feature in _features)
+            foreach (Feature feature in _featuresTemplate)
             {
                 sb.AppendLine($"<b>{feature.Name}.</b> {feature.Description}");
             }
@@ -85,26 +85,23 @@ namespace RelationshipAnarchyBot
             await Bot.SendTextMessageAsync(chatId, sb.ToString(), ParseMode.Html);
         }
 
-        private async Task MarkFeatures(long chatId)
+        private async Task MarkFeatures(long chatId, User user, string message)
         {
-            foreach (Feature feature in _features)
-            {
-                feature.Selected = Selected.Maybe;
-            }
+            _me = new PersonInfo(user.Username, _featuresTemplate, _featuresVersion);
             InlineKeyboardMarkup keyboard = GetKeyboard();
-            await Bot.SendTextMessageAsync(chatId, FeaturesQuestion, replyMarkup: keyboard);
+            await Bot.SendTextMessageAsync(chatId, message, replyMarkup: keyboard);
         }
 
         private async void OnCallbackQueryReceived(object sender, CallbackQueryEventArgs e)
         {
             long chatId = e.CallbackQuery.Message.Chat.Id;
-            foreach (Feature feature in _features)
+            foreach (Feature feature in _me.Features)
             {
                 if (feature.Name == e.CallbackQuery.Data)
                 {
                     feature.Toggle();
                     InlineKeyboardMarkup keyboard = GetKeyboard();
-                    await Bot.EditMessageTextAsync(chatId, e.CallbackQuery.Message.MessageId, FeaturesQuestion, replyMarkup: keyboard);
+                    await Bot.EditMessageTextAsync(chatId, e.CallbackQuery.Message.MessageId, e.CallbackQuery.Message.Text, replyMarkup: keyboard);
                     return;
                 }
             }
@@ -115,80 +112,60 @@ namespace RelationshipAnarchyBot
                     await Bot.DeleteMessageAsync(chatId, e.CallbackQuery.Message.MessageId);
                     break;
                 case Done:
-                    if (_partnerFeatures == null)
+                    if (_partner != null)
                     {
-                        await Bot.SendTextMessageAsync(chatId, "Send this code to your partner:");
-                        await Bot.SendTextMessageAsync(chatId, $"```{Encode(_features)}```", ParseMode.Markdown);
-                    }
-                    else
-                    {
-                        var matches = new List<Feature>();
-                        for (int i = 0; i < _features.Count; ++i)
-                        {
-                            Feature feature = _features[i];
-                            Feature partnerFeature = _partnerFeatures[i];
-
-                            if (feature.Selected != Selected.No && partnerFeature.Selected != Selected.No)
-                            {
-                                matches.Add(feature);
-                            }
-                        }
-
+                        List<Feature> matches = _me.Match(_partner);
                         string message;
                         if (matches.Any())
                         {
                             var sb = new StringBuilder();
-                            sb.AppendLine("You matched on:");
+                            sb.AppendLine($"You matched with @{_partner.Username} on:");
                             sb.AppendLine($"{string.Join(", ", matches.Select(f => f.Name))}.");
-                            sb.AppendLine("Share this result with your partner!");
                             message = sb.ToString();
                         }
                         else
                         {
-                            message = "You didn't match.";
+                            message = $"You didn't match with @{_partner.Username}.";
                         }
 
                         await Bot.SendTextMessageAsync(chatId, message);
                     }
+                    else
+                    {
+                        await Bot.SendTextMessageAsync(chatId, "Send this code to your partner:");
+                        string code = PersonInfo.Encode(_me);
+                        await Bot.SendTextMessageAsync(chatId, $"```{code}```", ParseMode.Markdown);
+                    }
+
                     break;
             }
+        }
+
+        private static List<Feature> LoadFeatures(IConfiguration configuration)
+        {
+            var features = new List<Feature>();
+            IConfigurationSection configFeatures = configuration.GetSection("features");
+            foreach (IConfigurationSection featuresSection in configFeatures.GetChildren())
+            {
+                var feature = new Feature(featuresSection["name"], featuresSection["description"]);
+                features.Add(feature);
+            }
+            return features;
         }
 
         private InlineKeyboardMarkup GetKeyboard()
         {
             var rows = new List<InlineKeyboardButton[]>();
-            foreach (Feature feature in _features)
+            foreach (Feature feature in _me.Features)
             {
                 rows.Add(new[] { feature.GetButton() });
             }
 
-            var cancel = new InlineKeyboardButton { Text = "Cancel 🗙", CallbackData = Cancel };
-            var done = new InlineKeyboardButton { Text = "Done ✔", CallbackData = Done };
+            var cancel = new InlineKeyboardButton { Text = "Cancel ✖️", CallbackData = Cancel };
+            var done = new InlineKeyboardButton { Text = "Done ✅", CallbackData = Done };
             rows.Add(new[] { cancel, done });
 
             return new InlineKeyboardMarkup(rows);
-        }
-
-        private static string Encode(List<Feature> features)
-        {
-            byte[] options = features.Select(f => (byte) f.Selected).ToArray();
-            return Convert.ToBase64String(options);
-        }
-
-        private static List<Feature> Decode(string code, List<Feature> featuresTemplate)
-        {
-            byte[] options = Convert.FromBase64String(code);
-            if (options.Length != featuresTemplate.Count)
-            {
-                return null;
-            }
-
-            var features = featuresTemplate.Select(f => f.Clone()).ToList();
-            for (int i = 0; i < features.Count; ++i)
-            {
-                features[i].Selected = (Selected) options[i];
-            }
-            return features;
         }
     }
 }

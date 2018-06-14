@@ -1,5 +1,4 @@
 ﻿using System;
-using System.Data;
 using System.IO;
 using Microsoft.Extensions.Configuration;
 using Telegram.Bot.Types;
