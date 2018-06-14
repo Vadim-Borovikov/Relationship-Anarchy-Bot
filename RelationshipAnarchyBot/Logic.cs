@@ -47,6 +47,9 @@ namespace RelationshipAnarchyBot
             User user = e.Message.From;
             switch (e.Message.Text)
             {
+                case "/start":
+                    await ShowMenu(chatId);
+                    break;
                 case "/help":
                     await ShowHelp(chatId);
                     break;
@@ -54,13 +57,7 @@ namespace RelationshipAnarchyBot
                     await MarkFeatures(chatId, user, "What would you like with your partner?");
                     break;
                 default:
-                    _partner = null;
-                    if (e.Message.ForwardFrom != null)
-                    {
-                        string code = e.Message.Text;
-                        _partner = PersonInfo.Decode(code, _featuresVersion, _featuresTemplate);
-                    }
-
+                    _partner = PersonInfo.Decode(e.Message.Text, _featuresVersion, _featuresTemplate);
                     if (_partner != null)
                     {
                         string question = $"@{_partner.Username}'s wishes decoded!{Environment.NewLine}What would you like?";
@@ -74,15 +71,22 @@ namespace RelationshipAnarchyBot
             }
         }
 
-        private async Task ShowHelp(long chatId)
+        private async Task ShowMenu(long chatId)
         {
             var sb = new StringBuilder();
-            foreach (Feature feature in _featuresTemplate)
-            {
-                sb.AppendLine($"<b>{feature.Name}.</b> {feature.Description}");
-            }
+            sb.AppendLine("/help - features list");
+            sb.AppendLine("/mark - mark which features would you like");
 
             await Bot.SendTextMessageAsync(chatId, sb.ToString(), ParseMode.Html);
+        }
+
+        private async Task ShowHelp(long chatId)
+        {
+            foreach (Feature feature in _featuresTemplate)
+            {
+                string message = $"<b>{feature.Name}.</b> {feature.Description}";
+                await Bot.SendTextMessageAsync(chatId, message, ParseMode.Html, true);
+            }
         }
 
         private async Task MarkFeatures(long chatId, User user, string message)
